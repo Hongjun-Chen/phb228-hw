@@ -1,0 +1,712 @@
+---
+title: "PHB 228 Homework 2: Statistical Models, Visualization, and Tools"
+author: "Hongjun Chen"
+date: "2026-05-20"
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: false
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+library(MASS)
+library(car)
+library(lme4)
+library(ggplot2)
+library(dplyr)
+library(palmerpenguins)
+library(shiny)
+library(parallel)
+library(microbenchmark)
+```
+
+# Part 1: Linear and Generalized Linear Models
+
+## 1.1 Linear Models and Diagnostics
+
+### (a)
+
+```{r}
+data(mtcars)
+
+lm1 <- lm(mpg ~ wt + hp, data = mtcars)
+summary(lm1)
+```
+
+The fitted model predicts miles per gallon (`mpg`) using vehicle weight (`wt`) and horsepower (`hp`). The intercept represents the predicted `mpg` when both `wt` and `hp` are zero, which is not meaningful in a practical sense here because cars with zero weight and zero horsepower do not exist. The coefficient for `wt` estimates the expected change in `mpg` for a one-unit increase in weight, holding horsepower constant. The coefficient for `hp` estimates the expected change in `mpg` for a one-unit increase in horsepower, holding weight constant. In this model, both predictors are expected to have negative coefficients, meaning heavier cars and cars with higher horsepower tend to have lower fuel efficiency.
+
+### (b)
+
+```{r}
+lm1_aug <- data.frame(
+  fitted = fitted(lm1),
+  residuals = resid(lm1),
+  std_resid = rstandard(lm1)
+)
+
+ggplot(lm1_aug, aes(x = fitted, y = residuals)) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    x = "Fitted values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+The residuals vs. fitted values plot is used to check whether the linearity and constant variance assumptions are reasonable. A good diagnostic plot should show residuals scattered randomly around zero without a strong curved pattern or clear funnel shape. If there is curvature, the linear model may be missing a nonlinear relationship. If the spread of residuals changes with fitted values, the constant variance assumption may be questionable.
+
+```{r}
+ggplot(lm1_aug, aes(sample = std_resid)) +
+  stat_qq(size = 2) +
+  stat_qq_line() +
+  labs(
+    title = "Normal Q-Q Plot of Standardized Residuals",
+    x = "Theoretical quantiles",
+    y = "Sample quantiles"
+  ) +
+  theme_minimal()
+```
+
+The normal Q-Q plot is used to assess whether the residuals are approximately normally distributed. If the points fall close to the reference line, the normality assumption is reasonably supported. Strong departures from the line, especially in the tails, would suggest non-normal residuals or possible outliers.
+
+### (c)
+
+```{r}
+vif(lm1)
+```
+
+Variance inflation factors (VIFs) measure how strongly each predictor is linearly related to the other predictors in the model. A VIF near 1 suggests little multicollinearity. Common rules of thumb are that VIF values above 5 or 10 may indicate concerning multicollinearity. For this model, if the VIFs are not large, then `wt` and `hp` can both be included without serious concern about unstable coefficient estimates due to collinearity.
+
+### (d)
+
+```{r}
+lm2 <- lm(mpg ~ wt * hp, data = mtcars)
+
+summary(lm2)
+
+anova(lm1, lm2)
+```
+
+The interaction model allows the association between wt and mpg to depend on horsepower, and it also allows the association between hp and mpg to depend on weight. The ANOVA comparison shows that adding the interaction term significantly improves the model fit compared with the additive model, with p-value about 0.0008. Therefore, I prefer the interaction model because it captures a statistically significant interaction between weight and horsepower and has better model fit.
+
+## 1.2 Logistic Regression
+
+```{r}
+data(biopsy, package = "MASS")
+
+biopsy <- na.omit(biopsy)
+biopsy$class <- factor(biopsy$class, levels = c("benign", "malignant"))
+
+str(biopsy)
+table(biopsy$class)
+```
+
+### (a)
+
+```{r}
+ggplot(biopsy, aes(x = class, y = V1, fill = class)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Cell Thickness by Tumor Class",
+    x = "Tumor class",
+    y = "V1: Cell thickness"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+The boxplot compares the distribution of cell thickness between benign and malignant tumors. If the malignant group has a higher median and generally larger values of `V1`, this suggests that malignant tumors tend to have greater cell thickness. The plot is useful because it shows both the center and spread of the variable by group.
+
+### (b)
+
+```{r}
+logit_fit <- glm(
+  class ~ V1 + V2 + V3,
+  data = biopsy,
+  family = binomial
+)
+
+summary(logit_fit)
+
+odds_ratios <- exp(coef(logit_fit))
+odds_ratios
+```
+
+This logistic regression models the log-odds of a tumor being malignant as a function of `V1`, `V2`, and `V3`. Positive coefficients indicate that higher values of the predictor are associated with higher odds of malignancy, holding the other predictors constant. The odds ratios are obtained by exponentiating the coefficients. An odds ratio greater than 1 means that a one-unit increase in that predictor is associated with higher odds of malignancy, holding the other variables constant.
+
+### (c)
+
+```{r}
+biopsy$pred_prob <- predict(logit_fit, type = "response")
+biopsy$pred_class <- factor(
+  ifelse(biopsy$pred_prob >= 0.5, "malignant", "benign"),
+  levels = c("benign", "malignant")
+)
+
+conf_mat <- table(
+  Predicted = biopsy$pred_class,
+  Actual = biopsy$class
+)
+
+conf_mat
+```
+
+```{r}
+TP <- conf_mat["malignant", "malignant"]
+TN <- conf_mat["benign", "benign"]
+FP <- conf_mat["malignant", "benign"]
+FN <- conf_mat["benign", "malignant"]
+
+accuracy <- (TP + TN) / sum(conf_mat)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+c(
+  accuracy = accuracy,
+  sensitivity = sensitivity,
+  specificity = specificity
+)
+```
+
+Accuracy is the overall proportion of observations correctly classified. Sensitivity is the proportion of true malignant tumors that are correctly classified as malignant. Specificity is the proportion of true benign tumors that are correctly classified as benign. These metrics describe different aspects of classification performance, so it is useful to report all three rather than only accuracy.
+
+### (d)
+
+```{r}
+new_obs <- data.frame(V1 = 5, V2 = 4, V3 = 4)
+
+new_prob <- predict(logit_fit, newdata = new_obs, type = "response")
+new_prob
+```
+
+For a new observation with `V1 = 5`, `V2 = 4`, and `V3 = 4`, the model estimates the probability of malignancy as the value shown above. If this probability is above 0.5, the observation would be classified as malignant using the threshold from part (c). If it is below 0.5, it would be classified as benign. The interpretation should be made as a model-based prediction, not as a guaranteed diagnosis.
+
+# Part 2: Mixed-Effects Models
+
+## (a)
+
+```{r}
+library(lme4)
+
+set.seed(123)
+
+n_participants <- 20
+n_items <- 15
+n_conditions <- 2
+
+participants <- factor(rep(1:n_participants, each = n_items * n_conditions))
+items <- factor(rep(rep(1:n_items, each = n_conditions), times = n_participants))
+condition <- factor(
+  rep(c("control", "treatment"), times = n_participants * n_items),
+  levels = c("control", "treatment")
+)
+
+participant_intercepts <- rnorm(n_participants, mean = 0, sd = 80)
+item_intercepts <- rnorm(n_items, mean = 0, sd = 40)
+
+rt <- 600 +
+  40 * (condition == "treatment") +
+  participant_intercepts[participants] +
+  item_intercepts[items] +
+  rnorm(length(condition), mean = 0, sd = 60)
+
+rt_data <- data.frame(
+  rt = rt,
+  participant = participants,
+  item = items,
+  condition = condition
+)
+
+head(rt_data)
+summary(rt_data)
+```
+
+This simulated dataset has 20 participants, 15 items, and 2 conditions. Each participant completed each item in both the control and treatment conditions, so the data have a crossed repeated-measures structure. Reaction time is simulated with a treatment effect, participant-level variation, item-level variation, and residual error.
+
+## (b)
+
+```{r}
+m_lm <- lm(rt ~ condition, data = rt_data)
+
+m_participant <- lmer(
+  rt ~ condition + (1 | participant),
+  data = rt_data,
+  REML = FALSE
+)
+
+m_participant_item <- lmer(
+  rt ~ condition + (1 | participant) + (1 | item),
+  data = rt_data,
+  REML = FALSE
+)
+
+summary(m_lm)
+summary(m_participant)
+summary(m_participant_item)
+
+AIC(m_lm, m_participant, m_participant_item)
+BIC(m_lm, m_participant, m_participant_item)
+anova(m_participant, m_participant_item)
+```
+
+The fixed-effects-only model ignores the fact that observations from the same participant or same item may be correlated. The random-intercepts participant model accounts for participant-level differences in baseline reaction time. The model with random intercepts for both participants and items accounts for both participant-level and item-level variation. I would prefer the model with random intercepts for both participants and items if it has better AIC/BIC and the likelihood ratio test suggests improved fit, because it better reflects the structure of the experiment.
+
+## (c)
+
+```{r}
+best_model <- m_participant_item
+
+fixef(best_model)
+
+vc_best <- as.data.frame(VarCorr(best_model))
+vc_best
+```
+
+```{r}
+var_participant <- vc_best$vcov[vc_best$grp == "participant"]
+var_item <- vc_best$vcov[vc_best$grp == "item"]
+var_resid <- attr(VarCorr(best_model), "sc")^2
+
+icc_participant <- var_participant / (var_participant + var_item + var_resid)
+icc_participant
+```
+
+The fixed intercept represents the estimated mean reaction time in the control condition for an average participant and average item. The fixed effect for `conditiontreatment` estimates the mean difference in reaction time between the treatment and control conditions, after accounting for participant and item differences. The participant ICC estimates the proportion of total variance attributable to differences between participants. A larger ICC means that observations from the same participant are more similar to each other because participant-to-participant differences explain a larger share of total variability.
+
+## (d)
+
+```{r}
+m_random_slope <- lmer(
+  rt ~ condition + (1 + condition | participant) + (1 | item),
+  data = rt_data,
+  REML = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_random_slope)
+
+anova(m_participant_item, m_random_slope)
+```
+
+The random-slope model allows the treatment effect to vary across participants. However, the likelihood ratio test comparing the random-slope model to the random-intercepts model gives a large p-value, so there is not strong evidence that the random slope improves model fit. The model output also indicates a singular fit, suggesting that the random-slope structure may be too complex for this simulated dataset. Therefore, I prefer the simpler random-intercepts model with random intercepts for both participants and items.
+
+## (e)
+
+```{r}
+ggplot(rt_data, aes(x = condition, y = rt, group = participant, color = participant)) +
+  geom_jitter(width = 0.08, alpha = 0.35, show.legend = FALSE) +
+  geom_line(
+    stat = "summary",
+    fun = mean,
+    alpha = 0.7,
+    show.legend = FALSE
+  ) +
+  labs(
+    title = "Individual Participant Reaction Time Patterns",
+    x = "Condition",
+    y = "Reaction time"
+  ) +
+  theme_minimal()
+```
+
+The plot shows each participant's average reaction time pattern across the control and treatment conditions. It is useful because it shows whether the treatment effect appears consistent across participants or whether some participants show stronger or weaker changes.
+
+# Part 3: Advanced Data Visualization
+
+```{r}
+penguins_clean <- penguins |>
+  filter(!is.na(bill_length_mm),
+         !is.na(flipper_length_mm),
+         !is.na(body_mass_g),
+         !is.na(sex),
+         !is.na(species))
+```
+
+## 3.1 Custom Theme
+
+```{r}
+theme_penguin <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold", size = rel(1.25)),
+      plot.subtitle = element_text(size = rel(1.0), margin = margin(b = 8)),
+      axis.title = element_text(face = "bold"),
+      axis.text = element_text(color = "gray25"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.25),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold")
+    )
+}
+```
+
+The custom theme is based on `theme_minimal()` and modifies more than five elements, including the plot title, subtitle, axis titles, axis text, minor grid lines, facet labels, and legend placement. The goal is to create a clean scientific style that can be reused across plots.
+
+## 3.2 Faceted plot
+
+```{r}
+sex_palette <- c("female" = "#0072B2", "male" = "#D55E00")
+
+ggplot(
+  penguins_clean,
+  aes(x = bill_length_mm, y = flipper_length_mm, color = sex)
+) +
+  geom_point(alpha = 0.75, size = 2) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species) +
+  scale_color_manual(values = sex_palette) +
+  labs(
+    title = "Bill Length and Flipper Length by Penguin Species",
+    subtitle = "Faceted by species with linear trend lines",
+    x = "Bill length (mm)",
+    y = "Flipper length (mm)",
+    color = "Sex"
+  ) +
+  theme_penguin()
+```
+
+This plot shows the relationship between bill length and flipper length separately for each penguin species. Faceting by species helps avoid hiding group-specific patterns. The regression lines summarize the linear association within each species, while the color coding shows sex differences.
+
+## 3.3 Distribution comparison
+
+```{r}
+ggplot(penguins_clean, aes(x = species, y = body_mass_g, fill = sex)) +
+  geom_violin(alpha = 0.45, position = position_dodge(width = 0.85), trim = FALSE) +
+  geom_boxplot(
+    width = 0.18,
+    position = position_dodge(width = 0.85),
+    outlier.alpha = 0.4
+  ) +
+  scale_fill_manual(values = sex_palette) +
+  scale_y_continuous(
+    limits = c(0, NA),
+    labels = scales::comma
+  ) +
+  labs(
+    title = "Body Mass by Species and Sex",
+    x = "Species",
+    y = "Body mass (g)",
+    fill = "Sex"
+  ) +
+  theme_penguin()
+```
+
+This plot compares body mass distributions by species and sex. The violin plot shows the shape of the distribution, while the boxplot summarizes the median and interquartile range. Starting the y-axis at zero makes the body mass scale easier to interpret in physical units.
+
+## 3.4 Complex Multi-Variable Visualization
+
+```{r}
+ggplot(
+  penguins_clean,
+  aes(
+    x = flipper_length_mm,
+    y = body_mass_g,
+    color = species,
+    shape = sex
+  )
+) +
+  geom_point(alpha = 0.75, size = 2.4) +
+  geom_smooth(aes(group = species), method = "lm", se = FALSE, linewidth = 0.8) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Penguin Body Mass, Flipper Length, Species, and Sex",
+    subtitle = "Points show individual penguins; lines show species-specific linear trends",
+    x = "Flipper length (mm)",
+    y = "Body mass (g)",
+    color = "Species",
+    shape = "Sex"
+  ) +
+  theme_penguin()
+```
+
+This visualization uses body mass, flipper length, species, and sex in one plot. Overall, penguins with longer flippers tend to have greater body mass. Gentoo penguins appear larger and have longer flippers than Adelie and Chinstrap penguins. The point shapes also suggest that sex is related to body mass, with males often appearing heavier than females within species. The regression lines help show that the positive relationship between flipper length and body mass is present within species, not only across species.
+
+# Part 4: Interactive Visualization with Shiny
+
+The following Shiny app explores the `mtcars` dataset. The code is included in the Quarto file but is not evaluated during rendering so that the homework document can render normally.
+
+## (a)
+
+The UI includes a `selectInput()` dropdown for choosing a predictor variable from `wt`, `hp`, `disp`, and `drat`. It also includes a `plotOutput()` for the scatter plot and a `verbatimTextOutput()` for the model summary.
+
+## (b)
+
+The server uses a `reactive()` expression to fit a linear model predicting `mpg` from the user-selected predictor. It uses `renderPlot()` to display the scatter plot with a regression line and `renderPrint()` to display the model summary.
+
+## (c)
+
+As an enhancement, I added a `sliderInput()` to filter cars by number of cylinders and a `checkboxInput()` to toggle the regression line. The cylinder filter lets users explore whether the relationship changes across car types, while the checkbox makes it easier to compare the raw scatter plot with the fitted trend.
+
+```{r shiny-app, eval=FALSE}
+library(shiny)
+library(ggplot2)
+library(dplyr)
+
+ui <- fluidPage(
+  titlePanel("Interactive mtcars Linear Model Explorer"),
+
+  sidebarLayout(
+    sidebarPanel(
+      # Part (a): dropdown for selecting predictor variable
+      selectInput(
+        inputId = "predictor",
+        label = "Choose predictor variable:",
+        choices = c("wt", "hp", "disp", "drat"),
+        selected = "wt"
+      ),
+
+      # Part (c): enhancement using a cylinder filter
+      sliderInput(
+        inputId = "cyl_filter",
+        label = "Include cars with number of cylinders:",
+        min = min(mtcars$cyl),
+        max = max(mtcars$cyl),
+        value = c(min(mtcars$cyl), max(mtcars$cyl)),
+        step = 2
+      ),
+
+      # Part (c): enhancement using a regression-line toggle
+      checkboxInput(
+        inputId = "show_line",
+        label = "Show regression line",
+        value = TRUE
+      )
+    ),
+
+    mainPanel(
+      # Part (a): output for scatter plot
+      plotOutput("scatter_plot"),
+
+      # Part (a): output for model summary
+      verbatimTextOutput("model_summary")
+    )
+  )
+)
+
+server <- function(input, output) {
+
+  filtered_data <- reactive({
+    mtcars |>
+      filter(cyl >= input$cyl_filter[1],
+             cyl <= input$cyl_filter[2])
+  })
+
+  # Part (b): reactive model using the selected predictor
+  model_fit <- reactive({
+    formula_text <- paste("mpg ~", input$predictor)
+    lm(as.formula(formula_text), data = filtered_data())
+  })
+
+  # Part (b): render scatter plot with optional regression line
+  output$scatter_plot <- renderPlot({
+    p <- ggplot(
+      filtered_data(),
+      aes(x = .data[[input$predictor]], y = mpg)
+    ) +
+      geom_point(size = 2.5, alpha = 0.8) +
+      labs(
+        title = paste("MPG vs.", input$predictor),
+        x = input$predictor,
+        y = "Miles per gallon"
+      ) +
+      theme_minimal()
+
+    if (input$show_line) {
+      p <- p + geom_smooth(method = "lm", se = TRUE)
+    }
+
+    p
+  })
+
+  # Part (b): render model summary
+  output$model_summary <- renderPrint({
+    summary(model_fit())
+  })
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+# Part 5: Parallel Computing
+
+## 5.1 System Setup and Benchmarking
+
+### (a)
+
+```{r}
+logical_cores <- detectCores(logical = TRUE)
+physical_cores <- detectCores(logical = FALSE)
+
+logical_cores
+physical_cores
+
+safe_cores <- max(1, logical_cores - 1)
+safe_cores
+```
+
+The number of logical and physical cores depends on the computer used to render this assignment. I define `safe_cores` as one fewer than the number of logical cores, with a minimum of one core. This is a common practical choice because it allows parallel computation while leaving one core available for the operating system and other tasks.
+
+### (b)
+
+```{r}
+slow_mean <- function(x) {
+  Sys.sleep(0.01)
+  mean(x)
+}
+
+set.seed(123)
+random_vectors <- replicate(
+  100,
+  rnorm(1000),
+  simplify = FALSE
+)
+
+sequential_run <- function() {
+  lapply(random_vectors, slow_mean)
+}
+
+parallel_run <- function() {
+  if (.Platform$OS.type == "windows") {
+    cl <- makeCluster(safe_cores)
+    on.exit(stopCluster(cl))
+    parLapply(cl, random_vectors, slow_mean)
+  } else {
+    mclapply(random_vectors, slow_mean, mc.cores = safe_cores)
+  }
+}
+
+bench_results <- microbenchmark(
+  sequential = sequential_run(),
+  parallel = parallel_run(),
+  times = 5
+)
+
+bench_results
+```
+
+```{r}
+summary(bench_results)[, c("expr", "median")]
+```
+
+The benchmark compares a sequential `lapply()` approach with a parallel approach. Because each call to `slow_mean()` includes a small artificial delay, the task is a good candidate for parallelization. If the parallel median time is smaller than the sequential median time, this suggests that distributing independent calculations across cores improves runtime.
+
+## 5.2 Parallel Bootstrap
+
+### (a)
+
+```{r}
+bootstrap_ci_sequential <- function(data, n_bootstrap = 1000, confidence = 0.95) {
+  boot_means <- numeric(n_bootstrap)
+  n <- length(data)
+
+  for (i in seq_len(n_bootstrap)) {
+    boot_sample <- sample(data, size = n, replace = TRUE)
+    boot_means[i] <- mean(boot_sample)
+  }
+
+  alpha <- 1 - confidence
+
+  ci <- quantile(
+    boot_means,
+    probs = c(alpha / 2, 1 - alpha / 2),
+    names = FALSE
+  )
+
+  c(lower = ci[1], upper = ci[2])
+}
+
+bootstrap_ci_sequential(mtcars$mpg, n_bootstrap = 1000)
+```
+
+### (b)
+
+```{r}
+bootstrap_ci_parallel <- function(data, n_bootstrap = 1000, confidence = 0.95) {
+  n <- length(data)
+
+  one_boot <- function(i) {
+    mean(sample(data, size = n, replace = TRUE))
+  }
+
+  if (.Platform$OS.type == "windows") {
+    cl <- makeCluster(safe_cores)
+    on.exit(stopCluster(cl))
+    clusterExport(cl, varlist = c("data", "n"), envir = environment())
+    boot_means <- unlist(parLapply(cl, seq_len(n_bootstrap), one_boot))
+  } else {
+    boot_means <- unlist(
+      mclapply(seq_len(n_bootstrap), one_boot, mc.cores = safe_cores)
+    )
+  }
+
+  alpha <- 1 - confidence
+
+  ci <- quantile(
+    boot_means,
+    probs = c(alpha / 2, 1 - alpha / 2),
+    names = FALSE
+  )
+
+  c(lower = ci[1], upper = ci[2])
+}
+
+bootstrap_ci_parallel(mtcars$mpg, n_bootstrap = 1000)
+```
+
+### (c)
+
+```{r}
+bootstrap_sizes <- c(500, 1000, 2000)
+
+timing_results <- lapply(bootstrap_sizes, function(B) {
+  timing <- microbenchmark(
+    sequential = bootstrap_ci_sequential(mtcars$mpg, n_bootstrap = B),
+    parallel = bootstrap_ci_parallel(mtcars$mpg, n_bootstrap = B),
+    times = 3
+  )
+  
+  timing_summary <- summary(timing, unit = "ms")
+  
+  data.frame(
+    n_bootstrap = B,
+    method = timing_summary$expr,
+    median_time_ms = timing_summary$median
+  )
+})
+
+timing_results <- bind_rows(timing_results)
+timing_results
+```
+
+```{r}
+ggplot(timing_results, aes(x = n_bootstrap, y = median_time_ms, color = method)) +
+  geom_point(size = 2.5) +
+  geom_line(linewidth = 0.8) +
+  labs(
+    title = "Sequential vs. Parallel Bootstrap Timing",
+    x = "Number of bootstrap samples",
+    y = "Median time (milliseconds)",
+    color = "Method"
+  ) +
+  theme_minimal()
+```
+
+The timing comparison shows how runtime changes as the number of bootstrap samples increases. In this example, the parallel version may not always be faster because mtcars$mpg is a small dataset and the bootstrap mean calculation is relatively cheap. Parallel computing has overhead from creating and managing workers, so it is most useful when each task is computationally expensive or when the number of repetitions is much larger. As the bootstrap size increases, the parallel approach may become more useful, but for small problems the sequential method can be competitive or faster.
+
+# Resources Used
+
+I used the PHB 228 lecture materials, the homework assignment instructions, and R documentation for the functions used in this assignment. I also used chatgpt to help check R syntax, and draft concise explanations. The prompt used was: "Check if there is anything wrong with my Quarto structure and my R syntax. And see if my explanation is clear and can be understood."
